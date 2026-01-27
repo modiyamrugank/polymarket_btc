@@ -81,6 +81,7 @@ class PolymarketBTCBot:
         print("  POLYMARKET BTC 15-MINUTE BOT")
         print("=" * 60)
         print(f"  Mode: {settings.get_mode_description()}")
+        print(f"  Strategy: {settings.get_strategy_description()}")
         print(f"  Bet Amount: ${settings.bet_amount:.2f}")
         print(f"  Min Odds: {settings.min_odds:.0%} | Max Odds: {settings.max_odds:.0%}")
         print("=" * 60)

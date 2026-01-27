@@ -2,7 +2,7 @@
 
 from pydantic_settings import BaseSettings
 from pydantic import Field
-from typing import Optional
+from typing import Optional, Literal
 
 
 class Settings(BaseSettings):
@@ -28,6 +28,29 @@ class Settings(BaseSettings):
     dry_run: bool = Field(default=True, alias="DRY_RUN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    # Strategy Configuration
+    # Actions: UP = bet on price going up, DOWN = bet on price going down, SKIP = no bet
+    green_green_action: Literal["UP", "DOWN", "SKIP"] = Field(
+        default="UP",
+        alias="GREEN_GREEN_ACTION",
+        description="Action when both candles are green"
+    )
+    red_red_action: Literal["UP", "DOWN", "SKIP"] = Field(
+        default="DOWN",
+        alias="RED_RED_ACTION",
+        description="Action when both candles are red"
+    )
+    green_red_action: Literal["UP", "DOWN", "SKIP"] = Field(
+        default="SKIP",
+        alias="GREEN_RED_ACTION",
+        description="Action when first candle is green, second is red"
+    )
+    red_green_action: Literal["UP", "DOWN", "SKIP"] = Field(
+        default="SKIP",
+        alias="RED_GREEN_ACTION",
+        description="Action when first candle is red, second is green"
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -44,6 +67,15 @@ class Settings(BaseSettings):
         if not self.is_trading_enabled():
             return "MONITORING MODE (credentials not configured)"
         return "LIVE TRADING MODE"
+
+    def get_strategy_description(self) -> str:
+        """Get a human-readable description of the current strategy."""
+        return (
+            f"GG→{self.green_green_action} | "
+            f"RR→{self.red_red_action} | "
+            f"GR→{self.green_red_action} | "
+            f"RG→{self.red_green_action}"
+        )
 
 
 # Global settings instance

@@ -49,6 +49,47 @@ class Candle:
 
 
 @dataclass
+class StrategyConfig:
+    """Configuration for the trading strategy."""
+
+    green_green: str = "UP"  # Action when both candles are green
+    red_red: str = "DOWN"  # Action when both candles are red
+    green_red: str = "SKIP"  # Action when green then red
+    red_green: str = "SKIP"  # Action when red then green
+
+    @classmethod
+    def momentum(cls) -> "StrategyConfig":
+        """Momentum strategy: follow the trend."""
+        return cls(green_green="UP", red_red="DOWN", green_red="SKIP", red_green="SKIP")
+
+    @classmethod
+    def contrarian(cls) -> "StrategyConfig":
+        """Contrarian strategy: bet against the trend."""
+        return cls(green_green="DOWN", red_red="UP", green_red="SKIP", red_green="SKIP")
+
+    @classmethod
+    def from_args(cls, gg: str, rr: str, gr: str, rg: str) -> "StrategyConfig":
+        """Create from CLI arguments."""
+        return cls(green_green=gg, red_red=rr, green_red=gr, red_green=rg)
+
+    def describe(self) -> str:
+        """Get a human-readable description."""
+        return f"GG→{self.green_green} | RR→{self.red_red} | GR→{self.green_red} | RG→{self.red_green}"
+
+    def get_action(self, c1_color: str, c2_color: str) -> str:
+        """Get the action for a given candle pattern."""
+        if c1_color == "GREEN" and c2_color == "GREEN":
+            return self.green_green
+        elif c1_color == "RED" and c2_color == "RED":
+            return self.red_red
+        elif c1_color == "GREEN" and c2_color == "RED":
+            return self.green_red
+        elif c1_color == "RED" and c2_color == "GREEN":
+            return self.red_green
+        return "SKIP"  # DOJI cases
+
+
+@dataclass
 class TradeResult:
     """Result of a single trade."""
     window_start: datetime
@@ -237,16 +278,16 @@ def group_into_windows(candles: list[Candle]) -> list[tuple[Candle, Candle, Cand
     return windows
 
 
-def analyze_window(c1: Candle, c2: Candle, c3: Candle) -> TradeResult:
+def analyze_window(
+    c1: Candle,
+    c2: Candle,
+    c3: Candle,
+    strategy: StrategyConfig,
+) -> TradeResult:
     """Analyze a 15-minute window and determine trade outcome."""
 
-    # Determine signal based on first two candles
-    if c1.is_green and c2.is_green:
-        signal = "UP"
-    elif c1.is_red and c2.is_red:
-        signal = "DOWN"
-    else:
-        signal = "SKIP"
+    # Determine signal based on first two candles and strategy
+    signal = strategy.get_action(c1.color, c2.color)
 
     # Determine actual direction of third candle
     if c3.is_green:
@@ -285,18 +326,21 @@ def analyze_window(c1: Candle, c2: Candle, c3: Candle) -> TradeResult:
     )
 
 
-def run_backtest(windows: list[tuple[Candle, Candle, Candle]]) -> list[TradeResult]:
+def run_backtest(
+    windows: list[tuple[Candle, Candle, Candle]],
+    strategy: StrategyConfig,
+) -> list[TradeResult]:
     """Run backtest on all windows."""
     results = []
 
     for c1, c2, c3 in windows:
-        result = analyze_window(c1, c2, c3)
+        result = analyze_window(c1, c2, c3, strategy)
         results.append(result)
 
     return results
 
 
-def print_results(results: list[TradeResult], bet_amount: float = 1.0):
+def print_results(results: list[TradeResult], strategy: StrategyConfig, bet_amount: float = 1.0):
     """Print backtest results summary."""
 
     total_windows = len(results)
@@ -314,9 +358,10 @@ def print_results(results: list[TradeResult], bet_amount: float = 1.0):
     print("\n" + "=" * 70)
     print("  BACKTEST RESULTS")
     print("=" * 70)
+    print(f"\n  Strategy: {strategy.describe()}")
 
     if results:
-        print(f"\n  Period: {results[0].window_start.strftime('%Y-%m-%d %H:%M')} to "
+        print(f"  Period: {results[0].window_start.strftime('%Y-%m-%d %H:%M')} to "
               f"{results[-1].window_start.strftime('%Y-%m-%d %H:%M')}")
 
     print(f"\n  Total 15-min windows analyzed: {total_windows}")
@@ -419,7 +464,22 @@ def print_results(results: list[TradeResult], bet_amount: float = 1.0):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Backtest the BTC trading strategy")
+    parser = argparse.ArgumentParser(
+        description="Backtest the BTC trading strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Strategy Examples:
+  Momentum (default):  --gg UP --rr DOWN --gr SKIP --rg SKIP
+  Contrarian:          --gg DOWN --rr UP --gr SKIP --rg SKIP
+  Always UP:           --gg UP --rr UP --gr SKIP --rg SKIP
+  Always DOWN:         --gg DOWN --rr DOWN --gr SKIP --rg SKIP
+  Bet on all:          --gg UP --rr DOWN --gr DOWN --rg UP
+
+Preset strategies:
+  --strategy momentum   (default)
+  --strategy contrarian
+        """,
+    )
     parser.add_argument(
         "--days",
         type=int,
@@ -444,7 +504,51 @@ async def main():
         help="Random seed for sample data generation (default: 42)",
     )
 
+    # Strategy arguments
+    parser.add_argument(
+        "--strategy",
+        choices=["momentum", "contrarian"],
+        help="Use a preset strategy (overrides individual --gg, --rr, etc.)",
+    )
+    parser.add_argument(
+        "--gg",
+        choices=["UP", "DOWN", "SKIP"],
+        default="UP",
+        help="Action for GREEN+GREEN pattern (default: UP)",
+    )
+    parser.add_argument(
+        "--rr",
+        choices=["UP", "DOWN", "SKIP"],
+        default="DOWN",
+        help="Action for RED+RED pattern (default: DOWN)",
+    )
+    parser.add_argument(
+        "--gr",
+        choices=["UP", "DOWN", "SKIP"],
+        default="SKIP",
+        help="Action for GREEN+RED pattern (default: SKIP)",
+    )
+    parser.add_argument(
+        "--rg",
+        choices=["UP", "DOWN", "SKIP"],
+        default="SKIP",
+        help="Action for RED+GREEN pattern (default: SKIP)",
+    )
+
     args = parser.parse_args()
+
+    # Build strategy config
+    if args.strategy == "momentum":
+        strategy = StrategyConfig.momentum()
+    elif args.strategy == "contrarian":
+        strategy = StrategyConfig.contrarian()
+    else:
+        strategy = StrategyConfig.from_args(
+            gg=args.gg,
+            rr=args.rr,
+            gr=args.gr,
+            rg=args.rg,
+        )
 
     # Fetch historical data
     if args.offline:
@@ -471,10 +575,10 @@ async def main():
         return
 
     # Run backtest
-    results = run_backtest(windows)
+    results = run_backtest(windows, strategy)
 
     # Print results
-    print_results(results, bet_amount=args.bet_amount)
+    print_results(results, strategy, bet_amount=args.bet_amount)
 
 
 if __name__ == "__main__":
