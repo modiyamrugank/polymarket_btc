@@ -66,6 +66,17 @@ class PolymarketBTCBot:
         self.running = True
 
         # Print startup banner
+        now = datetime.now()
+        window_start, window_end = get_current_15min_window(now)
+        bet_time = get_bet_time(window_start)
+
+        # If we're past bet time for this window, show next window
+        if now >= bet_time:
+            next_window_start = window_end
+            next_bet_time = get_bet_time(next_window_start)
+        else:
+            next_bet_time = bet_time
+
         print("\n" + "=" * 60)
         print("  POLYMARKET BTC 15-MINUTE BOT")
         print("=" * 60)
@@ -74,7 +85,9 @@ class PolymarketBTCBot:
         print(f"  Min Odds: {settings.min_odds:.0%} | Max Odds: {settings.max_odds:.0%}")
         print("=" * 60)
         print("\n  Timing: Bet at :10, :25, :40, :55 of each hour")
-        print("  (After two 5-min candles close within each 15-min window)\n")
+        print("  (After two 5-min candles close within each 15-min window)")
+        print(f"\n  Current time: {now.strftime('%H:%M:%S')}")
+        print(f"  Next bet at: {next_bet_time.strftime('%H:%M:%S')} ({seconds_until(next_bet_time, now):.0f}s)\n")
 
         if not settings.is_trading_enabled():
             logger.warning(
@@ -166,11 +179,33 @@ class PolymarketBTCBot:
             window_start: Start of the 15-minute window
             window_end: End of the 15-minute window (market resolution time)
         """
+        # Check if it's too early - candles need 10 minutes to form
+        now = datetime.now()
+        bet_time = get_bet_time(window_start)
+
+        if now < bet_time:
+            wait_seconds = seconds_until(bet_time, now)
+            logger.warning(
+                "too_early_for_candles",
+                window_start=window_start.isoformat(),
+                bet_time=bet_time.isoformat(),
+                wait_seconds=wait_seconds,
+            )
+            print(f"\n  Too early! Candles not yet closed.")
+            print(f"  Need to wait until {bet_time.strftime('%H:%M:%S')} ({wait_seconds:.0f}s)")
+            return
+
         # Step 1: Get the two 5-minute candles from this window
         # Candle 1: window_start to window_start + 5min
         # Candle 2: window_start + 5min to window_start + 10min
         try:
             candle_1, candle_2 = await self.price_fetcher.get_candles_for_window(window_start)
+        except ValueError as e:
+            # Candles not ready yet - this can happen at edge of bet time
+            logger.warning("candles_not_ready", error=str(e))
+            print(f"  Candles not ready yet: {e}")
+            print(f"  Will retry on next cycle...")
+            return
         except Exception as e:
             logger.error("failed_to_get_candles", error=str(e))
             print(f"  ERROR: Failed to get candles - {e}")
@@ -257,13 +292,32 @@ class PolymarketBTCBot:
             logger.error("bet_failed", error=bet_result.error)
             print(f"\n  Result: BET FAILED - {bet_result.error}")
 
-    async def run_once(self):
-        """Run a single iteration for the current window (useful for testing)."""
+    async def run_once(self, wait_for_bet_time: bool = True):
+        """
+        Run a single iteration for the current window (useful for testing).
+
+        Args:
+            wait_for_bet_time: If True, wait until bet time if started early.
+                              If False, will return early if candles not ready.
+        """
         now = datetime.now()
         window_start, window_end = get_current_15min_window(now)
+        bet_time = get_bet_time(window_start)
 
         print(f"\n[{now.strftime('%H:%M:%S')}] Running single iteration")
         print(f"  Current window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')}")
+        print(f"  Bet time: {bet_time.strftime('%H:%M:%S')}")
+
+        # Check if we need to wait
+        if now < bet_time:
+            wait_seconds = seconds_until(bet_time, now)
+            if wait_for_bet_time:
+                print(f"  Waiting {wait_seconds:.0f}s for candles to close...")
+                await asyncio.sleep(wait_seconds + 1)  # +1 second buffer
+            else:
+                print(f"  Too early - candles close in {wait_seconds:.0f}s")
+                await self.stop()
+                return
 
         await self._execute_trade(window_start, window_end)
         await self.stop()
