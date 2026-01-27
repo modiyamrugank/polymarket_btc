@@ -1,7 +1,7 @@
 """Main bot logic for the Polymarket BTC trading bot."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import structlog
 
 from .config import settings
@@ -12,11 +12,43 @@ from .tracker import BetTracker
 
 logger = structlog.get_logger()
 
-# How often to check for new candle data (in seconds)
-CHECK_INTERVAL = 60  # Check every minute
 
-# Time buffer before market end to place bets (in seconds)
-BET_BUFFER_SECONDS = 120  # Place bet at least 2 minutes before market ends
+def get_current_15min_window(now: datetime = None) -> tuple[datetime, datetime]:
+    """
+    Get the start and end times of the current 15-minute window.
+
+    Windows are: :00-:15, :15-:30, :30-:45, :45-:00
+
+    Returns:
+        Tuple of (window_start, window_end)
+    """
+    if now is None:
+        now = datetime.now()
+
+    # Find the start of the current 15-minute window
+    minute = now.minute
+    window_start_minute = (minute // 15) * 15
+
+    window_start = now.replace(minute=window_start_minute, second=0, microsecond=0)
+    window_end = window_start + timedelta(minutes=15)
+
+    return window_start, window_end
+
+
+def get_bet_time(window_start: datetime) -> datetime:
+    """
+    Get the time when we should place our bet for this window.
+
+    We bet at minute 10 of each 15-minute window (after two 5-min candles close).
+    """
+    return window_start + timedelta(minutes=10)
+
+
+def seconds_until(target: datetime, now: datetime = None) -> float:
+    """Get seconds until target time."""
+    if now is None:
+        now = datetime.now()
+    return (target - now).total_seconds()
 
 
 class PolymarketBTCBot:
@@ -27,7 +59,7 @@ class PolymarketBTCBot:
         self.polymarket_client = PolymarketClient()
         self.tracker = BetTracker()
         self.running = False
-        self._last_bet_market_id: str | None = None
+        self._last_bet_window: datetime | None = None
 
     async def start(self):
         """Start the bot."""
@@ -40,7 +72,9 @@ class PolymarketBTCBot:
         print(f"  Mode: {settings.get_mode_description()}")
         print(f"  Bet Amount: ${settings.bet_amount:.2f}")
         print(f"  Min Odds: {settings.min_odds:.0%} | Max Odds: {settings.max_odds:.0%}")
-        print("=" * 60 + "\n")
+        print("=" * 60)
+        print("\n  Timing: Bet at :10, :25, :40, :55 of each hour")
+        print("  (After two 5-min candles close within each 15-min window)\n")
 
         if not settings.is_trading_enabled():
             logger.warning(
@@ -70,35 +104,86 @@ class PolymarketBTCBot:
         logger.info("bot_stopped")
 
     async def _run_loop(self):
-        """Main bot loop."""
+        """
+        Main bot loop aligned with 15-minute windows.
+
+        Timing:
+        - 15-min windows: :00-:15, :15-:30, :30-:45, :45-:00
+        - Bet placement: :10, :25, :40, :55 (10 mins into each window)
+        - Market resolves: :15, :30, :45, :00 (5 mins after bet)
+        """
         while self.running:
             try:
-                await self._check_and_trade()
+                now = datetime.now()
+                window_start, window_end = get_current_15min_window(now)
+                bet_time = get_bet_time(window_start)
+
+                # Check if we already bet on this window
+                if self._last_bet_window == window_start:
+                    # Wait for next window
+                    wait_seconds = seconds_until(window_end, now) + 1
+                    print(f"\n[{now.strftime('%H:%M:%S')}] Already bet on this window. "
+                          f"Next window starts at {window_end.strftime('%H:%M:%S')} "
+                          f"(waiting {wait_seconds:.0f}s)")
+                    await asyncio.sleep(min(wait_seconds, 60))
+                    continue
+
+                # Check if it's time to bet
+                if now < bet_time:
+                    # Wait until bet time
+                    wait_seconds = seconds_until(bet_time, now)
+                    print(f"\n[{now.strftime('%H:%M:%S')}] Window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} | "
+                          f"Bet time: {bet_time.strftime('%H:%M:%S')} | "
+                          f"Waiting {wait_seconds:.0f}s...")
+
+                    # Sleep in chunks to allow for graceful shutdown
+                    while wait_seconds > 0 and self.running:
+                        sleep_time = min(wait_seconds, 10)
+                        await asyncio.sleep(sleep_time)
+                        wait_seconds -= sleep_time
+                    continue
+
+                # It's bet time! Execute the trade
+                print(f"\n{'='*60}")
+                print(f"[{now.strftime('%H:%M:%S')}] BET TIME for window {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')}")
+                print(f"{'='*60}")
+
+                await self._execute_trade(window_start, window_end)
+                self._last_bet_window = window_start
+
+                # Wait a bit before checking for next window
+                await asyncio.sleep(5)
+
             except Exception as e:
                 logger.error("error_in_main_loop", error=str(e))
+                await asyncio.sleep(10)
 
-            # Wait before next check
-            await asyncio.sleep(CHECK_INTERVAL)
+    async def _execute_trade(self, window_start: datetime, window_end: datetime):
+        """
+        Execute trade for the current 15-minute window.
 
-    async def _check_and_trade(self):
-        """Check market conditions and place trade if appropriate."""
-        logger.debug("checking_market_conditions")
-
-        # Step 1: Get the last two closed candles
+        Args:
+            window_start: Start of the 15-minute window
+            window_end: End of the 15-minute window (market resolution time)
+        """
+        # Step 1: Get the two 5-minute candles from this window
+        # Candle 1: window_start to window_start + 5min
+        # Candle 2: window_start + 5min to window_start + 10min
         try:
-            candle_1, candle_2 = await self.price_fetcher.get_last_two_closed_candles()
+            candle_1, candle_2 = await self.price_fetcher.get_candles_for_window(window_start)
         except Exception as e:
             logger.error("failed_to_get_candles", error=str(e))
+            print(f"  ERROR: Failed to get candles - {e}")
             return
 
         # Step 2: Analyze candles for signal
         signal_result = analyze_candles(candle_1, candle_2)
 
         # Log current state
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Candle Analysis:")
-        print(f"  Candle 1: {candle_1}")
-        print(f"  Candle 2: {candle_2}")
-        print(f"  Signal: {signal_result}")
+        print(f"\n  Candle Analysis:")
+        print(f"    Candle 1 ({window_start.strftime('%H:%M')}-{(window_start + timedelta(minutes=5)).strftime('%H:%M')}): {candle_1.color} | O:{candle_1.open_price:.2f} C:{candle_1.close_price:.2f}")
+        print(f"    Candle 2 ({(window_start + timedelta(minutes=5)).strftime('%H:%M')}-{(window_start + timedelta(minutes=10)).strftime('%H:%M')}): {candle_2.color} | O:{candle_2.open_price:.2f} C:{candle_2.close_price:.2f}")
+        print(f"    Signal: {signal_result.signal.value} - {signal_result.reason}")
 
         # Step 3: Check if we should skip
         if signal_result.signal == Signal.SKIP:
@@ -108,52 +193,43 @@ class PolymarketBTCBot:
                 candle_2_color=candle_2.color,
                 reason=signal_result.reason,
             )
-            print(f"  Action: SKIP - {signal_result.reason}")
+            print(f"\n  Action: SKIP - {signal_result.reason}")
             return
 
-        # Step 4: Find an active BTC 15-minute market
+        # Step 4: Find the BTC 15-minute market ending at window_end
         market = await self.polymarket_client.find_btc_15min_market()
 
         if not market:
             logger.warning("no_market_found", signal=signal_result.signal.value)
-            print("  Action: SKIP - No active BTC 15-minute market found")
+            print(f"\n  Action: SKIP - No active BTC 15-minute market found")
+
+            # Still record what we would have bet
+            print(f"  Would have bet: {signal_result.signal.value}")
             return
 
-        # Check if we already bet on this market
-        if market.condition_id == self._last_bet_market_id:
-            logger.debug("already_bet_on_market", market_id=market.condition_id)
-            print(f"  Action: SKIP - Already bet on this market")
-            return
-
-        # Step 5: Check market timing
-        now = datetime.now(market.end_date.tzinfo) if market.end_date.tzinfo else datetime.now()
-        time_to_end = (market.end_date - now).total_seconds()
-
-        if time_to_end < BET_BUFFER_SECONDS:
-            logger.debug("market_ending_soon", seconds_remaining=time_to_end)
-            print(f"  Action: SKIP - Market ends in {time_to_end:.0f}s (need {BET_BUFFER_SECONDS}s buffer)")
-            return
-
-        # Step 6: Check odds
+        # Step 5: Check odds
         side = get_signal_for_polymarket(signal_result.signal)
         if side is None:
             return
 
         price = market.outcome_prices.get(side, 0.5)
 
+        print(f"\n  Market: {market.question[:70]}...")
+        print(f"  Market ends: {market.end_date.strftime('%H:%M:%S') if market.end_date else 'Unknown'}")
+        print(f"  Current odds: Yes={market.outcome_prices.get('Yes', 0):.2%} | No={market.outcome_prices.get('No', 0):.2%}")
+
         if price < settings.min_odds:
             logger.debug("odds_too_low", price=price, min=settings.min_odds)
-            print(f"  Action: SKIP - Odds too low ({price:.2%} < {settings.min_odds:.0%})")
+            print(f"\n  Action: SKIP - Odds too low ({price:.2%} < {settings.min_odds:.0%})")
             return
 
         if price > settings.max_odds:
             logger.debug("odds_too_high", price=price, max=settings.max_odds)
-            print(f"  Action: SKIP - Odds too high ({price:.2%} > {settings.max_odds:.0%})")
+            print(f"\n  Action: SKIP - Odds too high ({price:.2%} > {settings.max_odds:.0%})")
             return
 
-        # Step 7: Place the bet
-        print(f"\n  Market: {market.question[:60]}...")
-        print(f"  Placing bet: {side} @ {price:.2%} for ${settings.bet_amount:.2f}")
+        # Step 6: Place the bet
+        print(f"\n  Placing bet: {side} @ {price:.2%} for ${settings.bet_amount:.2f}")
 
         bet_result = await self.polymarket_client.place_bet(
             market=market,
@@ -162,8 +238,6 @@ class PolymarketBTCBot:
         )
 
         if bet_result.success:
-            self._last_bet_market_id = market.condition_id
-
             # Record the bet
             self.tracker.record_bet(
                 signal=signal_result.signal,
@@ -174,14 +248,25 @@ class PolymarketBTCBot:
             )
 
             mode = "SIMULATED" if bet_result.simulated else "LIVE"
-            print(f"  Result: {mode} BET PLACED - {bet_result}")
+            print(f"\n  Result: {mode} BET PLACED")
+            print(f"    Side: {bet_result.side}")
+            print(f"    Price: {bet_result.price:.2%}")
+            print(f"    Amount: ${bet_result.amount:.2f}")
+            print(f"    Market resolves at: {window_end.strftime('%H:%M:%S')}")
         else:
             logger.error("bet_failed", error=bet_result.error)
-            print(f"  Result: BET FAILED - {bet_result.error}")
+            print(f"\n  Result: BET FAILED - {bet_result.error}")
 
     async def run_once(self):
-        """Run a single iteration (useful for testing)."""
-        await self._check_and_trade()
+        """Run a single iteration for the current window (useful for testing)."""
+        now = datetime.now()
+        window_start, window_end = get_current_15min_window(now)
+
+        print(f"\n[{now.strftime('%H:%M:%S')}] Running single iteration")
+        print(f"  Current window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')}")
+
+        await self._execute_trade(window_start, window_end)
+        await self.stop()
 
 
 async def run_bot():

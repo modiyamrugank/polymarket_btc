@@ -4,16 +4,32 @@ A trading bot that bets on Polymarket's BTC 15-minute up/down markets based on c
 
 ## Strategy
 
-The bot uses a simple momentum-based strategy:
+The bot uses a simple momentum-based strategy aligned with Polymarket's 15-minute windows:
 
-| Last 2 Candles | Action |
-|---------------|--------|
+### Timing
+
+```
+15-min Window:    |-------- 15 minutes --------|
+                  :00        :05        :10    :15
+                   |----------|----------|------|
+                   Candle 1   Candle 2   BET!   Market
+                   (5 min)    (5 min)           Resolves
+```
+
+- **15-minute windows**: :00-:15, :15-:30, :30-:45, :45-:00
+- **Bet times**: :10, :25, :40, :55 (after two 5-min candles close)
+- **Resolution**: 5 minutes after each bet
+
+### Signal Logic
+
+| Candles in Window | Action |
+|-------------------|--------|
 | GREEN + GREEN | Bet **UP** (BTC will go up) |
 | RED + RED | Bet **DOWN** (BTC will go down) |
 | GREEN + RED | **SKIP** (no clear trend) |
 | RED + GREEN | **SKIP** (no clear trend) |
 
-The bot analyzes the last two closed 5-minute candles from Binance to predict the next 15-minute price movement.
+The bot analyzes the two 5-minute candles within each 15-minute window to predict the final 5-minute movement.
 
 ## Features
 
@@ -133,11 +149,14 @@ polymarket_btc/
 
 ## How It Works
 
-1. **Price Fetcher**: Gets 5-minute BTC/USDT candles from Binance's public API
-2. **Candle Analyzer**: Examines the last two closed candles to generate a signal
-3. **Market Discovery**: Searches Polymarket for active BTC 15-minute markets
-4. **Bet Placement**: Places the bet via Polymarket's CLOB API (or simulates in monitoring mode)
-5. **Tracking**: Records all bets and calculates performance statistics
+1. **Window Tracking**: Bot identifies the current 15-minute window (e.g., 12:00-12:15)
+2. **Wait for Candles**: Waits until minute :10 of the window (e.g., 12:10)
+3. **Price Fetcher**: Gets the two 5-minute candles within the window from Binance
+4. **Candle Analyzer**: Analyzes the candle colors to generate a signal (UP/DOWN/SKIP)
+5. **Market Discovery**: Finds the active Polymarket BTC 15-minute market
+6. **Bet Placement**: Places the bet for the remaining 5 minutes (or simulates in monitoring mode)
+7. **Tracking**: Records all bets with timestamps, signals, and outcomes
+8. **Next Window**: Waits for the next 15-minute window and repeats
 
 ## Risks & Disclaimers
 
