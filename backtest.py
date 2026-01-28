@@ -374,21 +374,64 @@ def print_results(results: list[TradeResult], strategy: StrategyConfig, bet_amou
 
     if trades:
         win_rate = len(wins) / len(trades) * 100
+        win_rate_decimal = len(wins) / len(trades)
         print(f"\n  Wins: {len(wins)}")
         print(f"  Losses: {len(losses)}")
         print(f"  Win Rate: {win_rate:.1f}%")
 
-        # Calculate P&L assuming 50/50 odds (simplification)
-        # Win = +bet_amount, Loss = -bet_amount
-        total_pnl = (len(wins) - len(losses)) * bet_amount
-        print(f"\n  Simulated P&L (at $1/bet, 50% odds): ${total_pnl:+.2f}")
+        # Calculate break-even odds
+        # At break-even: win_rate * payout = (1 - win_rate) * bet
+        # payout = (1/odds - 1) * bet
+        # So: win_rate * (1/odds - 1) = (1 - win_rate)
+        # Solving for odds: odds = win_rate
+        breakeven_odds = win_rate_decimal
+        print(f"  Break-even odds: {breakeven_odds:.1%}")
 
-        # More realistic: assuming avg odds of 52% (slight edge)
-        # Win pays: bet * (1/0.52 - 1) = bet * 0.923
-        # Loss pays: -bet
-        avg_win_payout = bet_amount * 0.923
-        realistic_pnl = len(wins) * avg_win_payout - len(losses) * bet_amount
-        print(f"  Simulated P&L (at $1/bet, 52% odds): ${realistic_pnl:+.2f}")
+        # P&L calculation explanation
+        print("\n" + "-" * 70)
+        print("  SIMULATED P&L AT VARIOUS ODDS")
+        print("-" * 70)
+        print(f"\n  Bet amount: ${bet_amount:.2f} per trade | Total trades: {len(trades)}")
+        print("\n  How it works:")
+        print("  - You pay: odds × bet_amount to enter")
+        print("  - If you win: you receive bet_amount (profit = bet_amount - cost)")
+        print("  - If you lose: you lose your cost")
+        print("")
+
+        # Test multiple odds scenarios
+        odds_scenarios = [0.40, 0.45, 0.48, 0.50, 0.52, 0.55, 0.58, 0.60]
+
+        print(f"  {'Odds':<8} {'Cost/Trade':<12} {'Win Profit':<12} {'Loss':<10} {'Total P&L':<12} {'ROI':<10}")
+        print(f"  {'-'*8} {'-'*12} {'-'*12} {'-'*10} {'-'*12} {'-'*10}")
+
+        for odds in odds_scenarios:
+            # Cost to enter = odds * bet_amount
+            cost_per_trade = odds * bet_amount
+            # Win profit = bet_amount - cost (you get $1 back, minus what you paid)
+            win_profit = bet_amount - cost_per_trade
+            # Loss = cost (you lose what you paid)
+            loss_amount = cost_per_trade
+
+            # Total P&L
+            total_pnl = len(wins) * win_profit - len(losses) * loss_amount
+            # Total invested
+            total_invested = len(trades) * cost_per_trade
+            # ROI
+            roi = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
+
+            # Highlight profitable scenarios
+            marker = "  " if total_pnl <= 0 else "✓ "
+            print(f"{marker}{odds:.0%}      ${cost_per_trade:<11.2f} ${win_profit:<11.2f} -${loss_amount:<9.2f} ${total_pnl:<+11.2f} {roi:+.1f}%")
+
+        # Expected value analysis
+        print("\n  Expected Value per trade at each odds level:")
+        print(f"  (EV = win_rate × win_profit - loss_rate × loss)")
+        print("")
+        for odds in [0.45, 0.50, 0.55]:
+            cost = odds * bet_amount
+            win_profit = bet_amount - cost
+            ev = win_rate_decimal * win_profit - (1 - win_rate_decimal) * cost
+            print(f"    At {odds:.0%} odds: EV = ${ev:+.4f} per trade")
 
     print("\n" + "-" * 70)
     print("  BREAKDOWN BY SIGNAL TYPE")
