@@ -217,6 +217,14 @@
         }
         return true;
       }
+      if (filterMode === "not") {
+        for (const tag of selectedTags) {
+          if (rowTagSet.has(tag)) {
+            return false;
+          }
+        }
+        return true;
+      }
       for (const tag of selectedTags) {
         if (rowTagSet.has(tag)) {
           return true;
@@ -323,6 +331,7 @@
           <select id="tm-tag-mode" class="tm-tag-mode">
             <option value="any">any tag</option>
             <option value="all">all tags</option>
+            <option value="not">not tags</option>
           </select>
           <button id="tm-clear-filter" class="tm-btn" type="button">Clear</button>
         </div>
@@ -371,7 +380,7 @@
       if (mode) {
         mode.value = filterMode;
         mode.addEventListener("change", () => {
-          filterMode = mode.value === "all" ? "all" : "any";
+          filterMode = mode.value === "all" || mode.value === "not" ? mode.value : "any";
           scheduleRefresh();
         });
       }
