@@ -4,7 +4,8 @@
 // @version      0.2.0
 // @description  Tag Zerodha equity holdings, filter by tags, and view KPIs
 // @author       You
-// @match        https://kite.zerodha.com/holdings/equity
+// @match        https://kite.zerodha.com/*
+// @run-at       document-idle
 // @grant        none
 // ==/UserScript==
 "use strict";
@@ -13,14 +14,20 @@
   (() => {
     "use strict";
     const STORAGE_KEY = "tm-kite-holdings-tags-v1";
+    const UI_STORAGE_KEY = "tm-kite-holdings-ui-v1";
     const PANEL_ID = "tm-kite-tags-panel";
+    const PANEL_MOUNT_ID = "tm-kite-tags-mount";
     const numberFormat = new Intl.NumberFormat("en-IN", {
       maximumFractionDigits: 2
     });
-    let tagStore = loadTagStore();
+    const tagStore = loadTagStore();
+    const uiState = loadUiState();
     let selectedTags = /* @__PURE__ */ new Set();
     let filterMode = "any";
     let refreshScheduled = false;
+    function isHoldingsPage() {
+      return /^\/holdings\/equity\/?$/.test(window.location.pathname);
+    }
     function loadTagStore() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
@@ -46,6 +53,23 @@
     function saveTagStore() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(tagStore));
     }
+    function loadUiState() {
+      try {
+        const raw = localStorage.getItem(UI_STORAGE_KEY);
+        if (!raw) {
+          return { collapsed: false };
+        }
+        const parsed = JSON.parse(raw);
+        return {
+          collapsed: Boolean(parsed?.collapsed)
+        };
+      } catch {
+        return { collapsed: false };
+      }
+    }
+    function saveUiState() {
+      localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(uiState));
+    }
     function normalizeTags(tags) {
       const unique = /* @__PURE__ */ new Set();
       for (const tag of tags) {
@@ -68,6 +92,56 @@
         refreshScheduled = false;
         refreshTable();
       });
+    }
+    function removePanel() {
+      const panel = document.getElementById(PANEL_ID);
+      if (panel) {
+        panel.remove();
+      }
+      const mount = document.getElementById(PANEL_MOUNT_ID);
+      if (mount) {
+        mount.remove();
+      }
+    }
+    function isScriptOwnedElement(element) {
+      if (!element) {
+        return false;
+      }
+      if (element.id === PANEL_ID || element.id === PANEL_MOUNT_ID || element.id === "tm-kite-tag-style") {
+        return true;
+      }
+      return Boolean(element.closest(`#${PANEL_ID}`));
+    }
+    function isRelevantMutation(records) {
+      for (const record of records) {
+        const targetElement = record.target instanceof Element ? record.target : null;
+        if (isScriptOwnedElement(targetElement)) {
+          continue;
+        }
+        let hasExternalChange = false;
+        for (const node of Array.from(record.addedNodes)) {
+          if (node instanceof Element && !isScriptOwnedElement(node)) {
+            hasExternalChange = true;
+            break;
+          }
+        }
+        if (hasExternalChange) {
+          return true;
+        }
+        for (const node of Array.from(record.removedNodes)) {
+          if (node instanceof Element && !isScriptOwnedElement(node)) {
+            hasExternalChange = true;
+            break;
+          }
+        }
+        if (hasExternalChange) {
+          return true;
+        }
+        if (record.addedNodes.length === 0 && record.removedNodes.length === 0) {
+          return true;
+        }
+      }
+      return false;
     }
     function extractNumber(value) {
       if (!value) {
@@ -218,7 +292,16 @@
     function syncInputWithSelection(input) {
       input.value = Array.from(selectedTags).sort().join(", ");
     }
-    function ensurePanel() {
+    function ensurePanel(table) {
+      let mount = document.getElementById(PANEL_MOUNT_ID);
+      if (!mount) {
+        mount = document.createElement("div");
+        mount.id = PANEL_MOUNT_ID;
+        mount.className = "tm-panel-mount";
+      }
+      if (!mount.parentElement) {
+        table.insertAdjacentElement("beforebegin", mount);
+      }
       let panel = document.getElementById(PANEL_ID);
       if (panel) {
         return panel;
@@ -226,29 +309,59 @@
       panel = document.createElement("div");
       panel.id = PANEL_ID;
       panel.innerHTML = `
-      <div class="tm-panel-title">Kite Tag Filter</div>
-      <label class="tm-panel-label" for="tm-tag-input">Filter tags</label>
-      <input id="tm-tag-input" class="tm-tag-input" type="text" placeholder="swing, longterm" />
-      <div class="tm-panel-row">
-        <label class="tm-panel-label-inline" for="tm-tag-mode">Mode</label>
-        <select id="tm-tag-mode" class="tm-tag-mode">
-          <option value="any">any tag</option>
-          <option value="all">all tags</option>
-        </select>
-        <button id="tm-clear-filter" class="tm-btn" type="button">Clear</button>
+      <div class="tm-panel-head">
+        <div class="tm-panel-title">Holdings Tag Filter</div>
+        <button id="tm-panel-toggle" class="tm-panel-toggle" type="button" aria-expanded="true" title="Collapse or expand">
+          <span id="tm-panel-toggle-icon">-</span>
+        </button>
       </div>
-      <div id="tm-known-tags" class="tm-known-tags"></div>
-      <div class="tm-kpis">
-        <div class="tm-kpi"><span>Holdings</span><strong id="tm-kpi-count">0</strong></div>
-        <div class="tm-kpi"><span>Invested</span><strong id="tm-kpi-invested">0</strong></div>
-        <div class="tm-kpi"><span>Current</span><strong id="tm-kpi-current">0</strong></div>
-        <div class="tm-kpi"><span>P&amp;L</span><strong id="tm-kpi-pnl">0</strong></div>
+      <div id="tm-panel-body" class="tm-panel-body">
+        <label class="tm-panel-label" for="tm-tag-input">Filter tags</label>
+        <input id="tm-tag-input" class="tm-tag-input" type="text" placeholder="swing, longterm" />
+        <div class="tm-panel-row">
+          <label class="tm-panel-label-inline" for="tm-tag-mode">Mode</label>
+          <select id="tm-tag-mode" class="tm-tag-mode">
+            <option value="any">any tag</option>
+            <option value="all">all tags</option>
+          </select>
+          <button id="tm-clear-filter" class="tm-btn" type="button">Clear</button>
+        </div>
+        <div id="tm-known-tags" class="tm-known-tags"></div>
+        <div class="tm-kpis">
+          <div class="tm-kpi"><span>Holdings</span><strong id="tm-kpi-count">0</strong></div>
+          <div class="tm-kpi"><span>Invested</span><strong id="tm-kpi-invested">0</strong></div>
+          <div class="tm-kpi"><span>Current</span><strong id="tm-kpi-current">0</strong></div>
+          <div class="tm-kpi"><span>P&amp;L</span><strong id="tm-kpi-pnl">0</strong></div>
+        </div>
       </div>
     `;
-      document.body.appendChild(panel);
+      mount.appendChild(panel);
+      const body = panel.querySelector("#tm-panel-body");
+      const toggle = panel.querySelector("#tm-panel-toggle");
+      const toggleIcon = panel.querySelector("#tm-panel-toggle-icon");
       const input = panel.querySelector("#tm-tag-input");
       const mode = panel.querySelector("#tm-tag-mode");
       const clear = panel.querySelector("#tm-clear-filter");
+      const applyCollapsedState = () => {
+        const collapsed = uiState.collapsed;
+        if (body) {
+          body.style.display = collapsed ? "none" : "block";
+        }
+        if (toggle) {
+          toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        }
+        if (toggleIcon) {
+          toggleIcon.textContent = collapsed ? "+" : "-";
+        }
+      };
+      applyCollapsedState();
+      if (toggle) {
+        toggle.addEventListener("click", () => {
+          uiState.collapsed = !uiState.collapsed;
+          saveUiState();
+          applyCollapsedState();
+        });
+      }
       if (input) {
         input.addEventListener("input", () => {
           selectedTags = new Set(parseTagText(input.value));
@@ -344,13 +457,17 @@
       return null;
     }
     function refreshTable() {
-      const panel = ensurePanel();
-      renderKnownTags(panel);
-      const table = locateHoldingsTable();
-      if (!table) {
-        updateKpis(panel, 0, 0, 0, 0);
+      if (!isHoldingsPage()) {
+        removePanel();
         return;
       }
+      const table = locateHoldingsTable();
+      if (!table) {
+        removePanel();
+        return;
+      }
+      const panel = ensurePanel(table);
+      renderKnownTags(panel);
       const headers = Array.from(table.querySelectorAll("thead th")).map(
         (th) => (th.textContent || "").trim().toLowerCase()
       );
@@ -388,118 +505,180 @@
       const style = document.createElement("style");
       style.id = "tm-kite-tag-style";
       style.textContent = `
+      :root {
+        --tm-bg: #0f1622;
+        --tm-surface: #121b29;
+        --tm-surface-2: #0f1825;
+        --tm-border: #2a3b52;
+        --tm-text: #deebff;
+        --tm-muted: #8fa4bf;
+        --tm-accent: #2f81f7;
+      }
       #${PANEL_ID} {
-        position: fixed;
-        top: 72px;
-        right: 18px;
-        width: 320px;
-        max-height: calc(100vh - 90px);
-        overflow: auto;
-        z-index: 99999;
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-        border-radius: 10px;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+        width: 100%;
+        box-sizing: border-box;
+        background: linear-gradient(180deg, var(--tm-surface), var(--tm-bg));
+        border: 1px solid var(--tm-border);
+        border-radius: 8px;
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 16px rgba(0, 0, 0, 0.2);
         padding: 10px;
-        font-family: Segoe UI, sans-serif;
-        color: #0f172a;
+        font-family: inherit;
+        color: var(--tm-text);
+        margin-bottom: 8px;
+      }
+      #${PANEL_MOUNT_ID} {
+        width: 100%;
+      }
+      .tm-panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
       }
       .tm-panel-title {
-        font-size: 14px;
-        font-weight: 700;
+        font-size: 13px;
+        font-weight: 600;
         margin-bottom: 8px;
+        color: var(--tm-text);
+        letter-spacing: 0.2px;
+      }
+      .tm-panel-toggle {
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        border: 1px solid #3b516d;
+        background: #172538;
+        color: #cfe1f9;
+        font-size: 15px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        margin-bottom: 8px;
+      }
+      .tm-panel-toggle:hover {
+        background: #1d314a;
+      }
+      .tm-panel-body {
+        margin-top: 2px;
       }
       .tm-panel-label {
         display: block;
-        font-size: 12px;
+        font-size: 11px;
         margin-bottom: 4px;
+        color: var(--tm-muted);
       }
       .tm-tag-input {
         width: 100%;
         box-sizing: border-box;
-        border: 1px solid #94a3b8;
+        border: 1px solid var(--tm-border);
         border-radius: 6px;
-        padding: 6px 8px;
+        padding: 6px 9px;
         font-size: 12px;
         margin-bottom: 8px;
-        background: #ffffff;
+        background: var(--tm-surface-2);
+        color: var(--tm-text);
+        outline: none;
+      }
+      .tm-tag-input:focus {
+        border-color: var(--tm-accent);
+        box-shadow: 0 0 0 1px rgba(47, 129, 247, 0.28);
       }
       .tm-panel-row {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 8px;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
       }
       .tm-panel-label-inline {
-        font-size: 12px;
+        font-size: 11px;
+        color: var(--tm-muted);
       }
       .tm-tag-mode {
-        border: 1px solid #94a3b8;
+        border: 1px solid var(--tm-border);
         border-radius: 6px;
         padding: 4px 6px;
-        background: #ffffff;
+        background: var(--tm-surface-2);
+        color: var(--tm-text);
+        font-size: 12px;
       }
       .tm-btn {
         margin-left: auto;
-        border: 1px solid #94a3b8;
-        background: #e2e8f0;
+        border: 1px solid #395371;
+        background: #1a2e47;
+        color: #dbe9ff;
         border-radius: 6px;
-        padding: 4px 8px;
+        padding: 4px 10px;
+        font-size: 12px;
         cursor: pointer;
+      }
+      .tm-btn:hover {
+        background: #203b5d;
       }
       .tm-known-tags {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
+        gap: 5px;
         margin-bottom: 10px;
       }
       .tm-chip-toggle {
-        border: 1px solid #94a3b8;
-        background: #ffffff;
+        border: 1px solid #364c68;
+        background: #152132;
+        color: #c7d8ef;
         border-radius: 999px;
-        padding: 2px 8px;
+        padding: 2px 9px;
         font-size: 11px;
         cursor: pointer;
       }
       .tm-chip-toggle-active {
-        background: #0ea5e9;
-        border-color: #0284c7;
+        background: #1e4673;
+        border-color: #3c76af;
         color: #ffffff;
       }
       .tm-kpis {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 6px;
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 7px;
       }
       .tm-kpi {
-        border: 1px solid #cbd5e1;
-        border-radius: 8px;
-        background: #ffffff;
-        padding: 8px;
+        border: 1px solid #293b54;
+        border-radius: 6px;
+        background: #121c2a;
+        padding: 7px 8px;
       }
       .tm-kpi span {
         display: block;
-        font-size: 11px;
-        color: #475569;
+        font-size: 10px;
+        color: #8ca2bf;
+        margin-bottom: 2px;
+        text-transform: uppercase;
+        letter-spacing: 0.25px;
       }
       .tm-kpi strong {
         font-size: 12px;
+        font-weight: 600;
+        color: #edf4ff;
       }
       .tm-tag-wrapper {
-        margin-top: 4px;
+        margin-top: 5px;
         display: flex;
         align-items: flex-start;
-        gap: 6px;
+        gap: 5px;
         flex-wrap: wrap;
       }
       .tm-tag-edit-btn {
-        border: 1px solid #94a3b8;
+        border: 1px solid #415c7d;
         border-radius: 6px;
-        background: #eef2ff;
-        color: #1e293b;
+        background: #1d324b;
+        color: #d4e4fa;
         font-size: 11px;
-        padding: 1px 6px;
+        padding: 1px 7px;
         cursor: pointer;
+      }
+      .tm-tag-edit-btn:hover {
+        background: #244262;
       }
       .tm-row-tags {
         display: flex;
@@ -508,15 +687,15 @@
       }
       .tm-tag-chip {
         border-radius: 999px;
-        background: #dcfce7;
-        color: #166534;
+        background: #123426;
+        color: #9de9bc;
         font-size: 10px;
         padding: 1px 6px;
         line-height: 1.6;
       }
       .tm-tag-chip-empty {
-        background: #e2e8f0;
-        color: #475569;
+        background: #213247;
+        color: #99adc7;
       }
     `;
       document.head.appendChild(style);
@@ -524,15 +703,34 @@
     function bootstrap() {
       injectStyles();
       refreshTable();
-      const observer = new MutationObserver(() => {
+      const observer = new MutationObserver((records) => {
+        if (!isHoldingsPage()) {
+          return;
+        }
+        if (!isRelevantMutation(records)) {
+          return;
+        }
         scheduleRefresh();
       });
       observer.observe(document.body, {
         childList: true,
         subtree: true
       });
+      const originalPushState = history.pushState;
+      history.pushState = function(...args) {
+        const result = originalPushState.apply(this, args);
+        scheduleRefresh();
+        return result;
+      };
+      const originalReplaceState = history.replaceState;
+      history.replaceState = function(...args) {
+        const result = originalReplaceState.apply(this, args);
+        scheduleRefresh();
+        return result;
+      };
       window.addEventListener("load", scheduleRefresh);
-      setInterval(scheduleRefresh, 2500);
+      window.addEventListener("popstate", scheduleRefresh);
+      window.addEventListener("hashchange", scheduleRefresh);
     }
     bootstrap();
   })();
