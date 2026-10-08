@@ -1,0 +1,539 @@
+// ==UserScript==
+// @name         Kite Holdings Tagger + KPI Filter
+// @namespace    http://tampermonkey.net/
+// @version      0.2.0
+// @description  Tag Zerodha equity holdings, filter by tags, and view KPIs
+// @author       You
+// @match        https://kite.zerodha.com/holdings/equity
+// @grant        none
+// ==/UserScript==
+"use strict";
+(() => {
+  // src/main.ts
+  (() => {
+    "use strict";
+    const STORAGE_KEY = "tm-kite-holdings-tags-v1";
+    const PANEL_ID = "tm-kite-tags-panel";
+    const numberFormat = new Intl.NumberFormat("en-IN", {
+      maximumFractionDigits: 2
+    });
+    let tagStore = loadTagStore();
+    let selectedTags = /* @__PURE__ */ new Set();
+    let filterMode = "any";
+    let refreshScheduled = false;
+    function loadTagStore() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          return {};
+        }
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") {
+          return {};
+        }
+        const normalized = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (!Array.isArray(value)) {
+            continue;
+          }
+          normalized[key] = normalizeTags(value.map(String));
+        }
+        return normalized;
+      } catch {
+        return {};
+      }
+    }
+    function saveTagStore() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(tagStore));
+    }
+    function normalizeTags(tags) {
+      const unique = /* @__PURE__ */ new Set();
+      for (const tag of tags) {
+        const normalized = tag.trim().toLowerCase();
+        if (normalized) {
+          unique.add(normalized);
+        }
+      }
+      return Array.from(unique).sort();
+    }
+    function parseTagText(text) {
+      return normalizeTags(text.split(","));
+    }
+    function scheduleRefresh() {
+      if (refreshScheduled) {
+        return;
+      }
+      refreshScheduled = true;
+      requestAnimationFrame(() => {
+        refreshScheduled = false;
+        refreshTable();
+      });
+    }
+    function extractNumber(value) {
+      if (!value) {
+        return NaN;
+      }
+      const cleaned = value.replace(/\((.*?)\)/g, "-$1").replace(/[^\d.-]/g, "").trim();
+      if (!cleaned || cleaned === "-" || cleaned === "." || cleaned === "-." || cleaned === "--") {
+        return NaN;
+      }
+      const num = Number(cleaned);
+      return Number.isFinite(num) ? num : NaN;
+    }
+    function findColumnIndex(headers, patterns) {
+      for (let i = 0; i < headers.length; i += 1) {
+        const h = headers[i];
+        if (patterns.some((pattern) => pattern.test(h))) {
+          return i;
+        }
+      }
+      return -1;
+    }
+    function buildColumnMap(headers) {
+      return {
+        qty: findColumnIndex(headers, [/^qty\b/, /quantity/]),
+        avg: findColumnIndex(headers, [/avg/, /average/, /buy price/]),
+        invested: findColumnIndex(headers, [/invested/, /investment/, /buy value/]),
+        current: findColumnIndex(headers, [/current/, /cur\.?\s*val/, /value/]),
+        pnl: findColumnIndex(headers, [/p&l/, /pnl/, /profit/, /gain/, /loss/]),
+        ltp: findColumnIndex(headers, [/ltp/, /last traded/])
+      };
+    }
+    function getCellText(row, index) {
+      if (index < 0 || index >= row.cells.length) {
+        return "";
+      }
+      return row.cells[index].innerText || "";
+    }
+    function parseMetrics(row, map) {
+      const qty = extractNumber(getCellText(row, map.qty));
+      const avg = extractNumber(getCellText(row, map.avg));
+      const investedCell = extractNumber(getCellText(row, map.invested));
+      const currentCell = extractNumber(getCellText(row, map.current));
+      const pnlCell = extractNumber(getCellText(row, map.pnl));
+      const ltp = extractNumber(getCellText(row, map.ltp));
+      const invested = Number.isFinite(investedCell) ? investedCell : Number.isFinite(qty) && Number.isFinite(avg) ? qty * avg : 0;
+      const current = Number.isFinite(currentCell) ? currentCell : Number.isFinite(qty) && Number.isFinite(ltp) ? qty * ltp : 0;
+      const pnl = Number.isFinite(pnlCell) ? pnlCell : current - invested;
+      return { invested, current, pnl };
+    }
+    function getHoldingKey(row) {
+      const cached = row.dataset.tmHoldingKey;
+      if (cached) {
+        return cached;
+      }
+      const firstCellText = row.cells[0]?.innerText || "";
+      const key = (firstCellText.split("\n")[0] || "").trim().toUpperCase();
+      row.dataset.tmHoldingKey = key;
+      return key;
+    }
+    function formatCurrency(value) {
+      return numberFormat.format(value);
+    }
+    function rowMatchesTags(tags) {
+      if (selectedTags.size === 0) {
+        return true;
+      }
+      const rowTagSet = new Set(tags);
+      if (filterMode === "all") {
+        for (const tag of selectedTags) {
+          if (!rowTagSet.has(tag)) {
+            return false;
+          }
+        }
+        return true;
+      }
+      for (const tag of selectedTags) {
+        if (rowTagSet.has(tag)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    function upsertRowTagControls(row, key, tags) {
+      const firstCell = row.cells[0];
+      if (!firstCell) {
+        return;
+      }
+      let wrapper = firstCell.querySelector(".tm-tag-wrapper");
+      if (!wrapper) {
+        wrapper = document.createElement("div");
+        wrapper.className = "tm-tag-wrapper";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "tm-tag-edit-btn";
+        button.textContent = "Tag";
+        button.addEventListener("click", () => {
+          const current = (tagStore[key] || []).join(", ");
+          const input = window.prompt(
+            `Tags for ${key} (comma separated)`,
+            current
+          );
+          if (input === null) {
+            return;
+          }
+          const nextTags = parseTagText(input);
+          if (nextTags.length === 0) {
+            delete tagStore[key];
+          } else {
+            tagStore[key] = nextTags;
+          }
+          saveTagStore();
+          scheduleRefresh();
+        });
+        const chips2 = document.createElement("div");
+        chips2.className = "tm-row-tags";
+        wrapper.appendChild(button);
+        wrapper.appendChild(chips2);
+        firstCell.appendChild(wrapper);
+      }
+      const chips = wrapper.querySelector(".tm-row-tags");
+      if (!chips) {
+        return;
+      }
+      chips.innerHTML = "";
+      if (tags.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "tm-tag-chip tm-tag-chip-empty";
+        empty.textContent = "no tags";
+        chips.appendChild(empty);
+        return;
+      }
+      for (const tag of tags) {
+        const chip = document.createElement("span");
+        chip.className = "tm-tag-chip";
+        chip.textContent = tag;
+        chips.appendChild(chip);
+      }
+    }
+    function getAllKnownTags() {
+      const set = /* @__PURE__ */ new Set();
+      for (const tags of Object.values(tagStore)) {
+        for (const tag of tags) {
+          set.add(tag);
+        }
+      }
+      return Array.from(set).sort();
+    }
+    function syncInputWithSelection(input) {
+      input.value = Array.from(selectedTags).sort().join(", ");
+    }
+    function ensurePanel() {
+      let panel = document.getElementById(PANEL_ID);
+      if (panel) {
+        return panel;
+      }
+      panel = document.createElement("div");
+      panel.id = PANEL_ID;
+      panel.innerHTML = `
+      <div class="tm-panel-title">Kite Tag Filter</div>
+      <label class="tm-panel-label" for="tm-tag-input">Filter tags</label>
+      <input id="tm-tag-input" class="tm-tag-input" type="text" placeholder="swing, longterm" />
+      <div class="tm-panel-row">
+        <label class="tm-panel-label-inline" for="tm-tag-mode">Mode</label>
+        <select id="tm-tag-mode" class="tm-tag-mode">
+          <option value="any">any tag</option>
+          <option value="all">all tags</option>
+        </select>
+        <button id="tm-clear-filter" class="tm-btn" type="button">Clear</button>
+      </div>
+      <div id="tm-known-tags" class="tm-known-tags"></div>
+      <div class="tm-kpis">
+        <div class="tm-kpi"><span>Holdings</span><strong id="tm-kpi-count">0</strong></div>
+        <div class="tm-kpi"><span>Invested</span><strong id="tm-kpi-invested">0</strong></div>
+        <div class="tm-kpi"><span>Current</span><strong id="tm-kpi-current">0</strong></div>
+        <div class="tm-kpi"><span>P&amp;L</span><strong id="tm-kpi-pnl">0</strong></div>
+      </div>
+    `;
+      document.body.appendChild(panel);
+      const input = panel.querySelector("#tm-tag-input");
+      const mode = panel.querySelector("#tm-tag-mode");
+      const clear = panel.querySelector("#tm-clear-filter");
+      if (input) {
+        input.addEventListener("input", () => {
+          selectedTags = new Set(parseTagText(input.value));
+          scheduleRefresh();
+        });
+      }
+      if (mode) {
+        mode.value = filterMode;
+        mode.addEventListener("change", () => {
+          filterMode = mode.value === "all" ? "all" : "any";
+          scheduleRefresh();
+        });
+      }
+      if (clear) {
+        clear.addEventListener("click", () => {
+          selectedTags = /* @__PURE__ */ new Set();
+          if (input) {
+            input.value = "";
+          }
+          scheduleRefresh();
+        });
+      }
+      return panel;
+    }
+    function renderKnownTags(panel) {
+      const container = panel.querySelector("#tm-known-tags");
+      const input = panel.querySelector("#tm-tag-input");
+      if (!container) {
+        return;
+      }
+      container.innerHTML = "";
+      const tags = getAllKnownTags();
+      if (tags.length === 0) {
+        return;
+      }
+      for (const tag of tags) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "tm-chip-toggle";
+        if (selectedTags.has(tag)) {
+          button.classList.add("tm-chip-toggle-active");
+        }
+        button.textContent = tag;
+        button.addEventListener("click", () => {
+          if (selectedTags.has(tag)) {
+            selectedTags.delete(tag);
+          } else {
+            selectedTags.add(tag);
+          }
+          if (input) {
+            syncInputWithSelection(input);
+          }
+          scheduleRefresh();
+        });
+        container.appendChild(button);
+      }
+    }
+    function updateKpis(panel, count, invested, current, pnl) {
+      const investedEl = panel.querySelector("#tm-kpi-invested");
+      const currentEl = panel.querySelector("#tm-kpi-current");
+      const pnlEl = panel.querySelector("#tm-kpi-pnl");
+      const countEl = panel.querySelector("#tm-kpi-count");
+      if (countEl) {
+        countEl.textContent = String(count);
+      }
+      if (investedEl) {
+        investedEl.textContent = formatCurrency(invested);
+      }
+      if (currentEl) {
+        currentEl.textContent = formatCurrency(current);
+      }
+      if (pnlEl) {
+        const pct = invested !== 0 ? pnl / invested * 100 : 0;
+        const sign = pnl > 0 ? "+" : "";
+        pnlEl.textContent = `${sign}${formatCurrency(pnl)} (${sign}${pct.toFixed(2)}%)`;
+        pnlEl.style.color = pnl > 0 ? "#0a7f36" : pnl < 0 ? "#b42318" : "#111827";
+      }
+    }
+    function locateHoldingsTable() {
+      const tables = Array.from(document.querySelectorAll("table"));
+      for (const table of tables) {
+        const headers = Array.from(table.querySelectorAll("thead th")).map(
+          (th) => (th.textContent || "").trim().toLowerCase()
+        );
+        if (headers.length === 0) {
+          continue;
+        }
+        const looksLikeHoldings = headers.some((h) => /qty|quantity/.test(h)) && headers.some((h) => /avg|average|buy/.test(h)) && headers.some((h) => /p&l|pnl|gain|loss/.test(h));
+        if (looksLikeHoldings) {
+          return table;
+        }
+      }
+      return null;
+    }
+    function refreshTable() {
+      const panel = ensurePanel();
+      renderKnownTags(panel);
+      const table = locateHoldingsTable();
+      if (!table) {
+        updateKpis(panel, 0, 0, 0, 0);
+        return;
+      }
+      const headers = Array.from(table.querySelectorAll("thead th")).map(
+        (th) => (th.textContent || "").trim().toLowerCase()
+      );
+      const map = buildColumnMap(headers);
+      const rows = Array.from(table.querySelectorAll("tbody tr")).filter(
+        (row) => row.cells.length > 1
+      );
+      let visibleCount = 0;
+      let totalInvested = 0;
+      let totalCurrent = 0;
+      let totalPnl = 0;
+      for (const row of rows) {
+        const key = getHoldingKey(row);
+        if (!key) {
+          continue;
+        }
+        const tags = tagStore[key] || [];
+        upsertRowTagControls(row, key, tags);
+        const matches = rowMatchesTags(tags);
+        row.style.display = matches ? "" : "none";
+        if (matches) {
+          const metrics = parseMetrics(row, map);
+          visibleCount += 1;
+          totalInvested += metrics.invested;
+          totalCurrent += metrics.current;
+          totalPnl += metrics.pnl;
+        }
+      }
+      updateKpis(panel, visibleCount, totalInvested, totalCurrent, totalPnl);
+    }
+    function injectStyles() {
+      if (document.getElementById("tm-kite-tag-style")) {
+        return;
+      }
+      const style = document.createElement("style");
+      style.id = "tm-kite-tag-style";
+      style.textContent = `
+      #${PANEL_ID} {
+        position: fixed;
+        top: 72px;
+        right: 18px;
+        width: 320px;
+        max-height: calc(100vh - 90px);
+        overflow: auto;
+        z-index: 99999;
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+        padding: 10px;
+        font-family: Segoe UI, sans-serif;
+        color: #0f172a;
+      }
+      .tm-panel-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      .tm-panel-label {
+        display: block;
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
+      .tm-tag-input {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #94a3b8;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 12px;
+        margin-bottom: 8px;
+        background: #ffffff;
+      }
+      .tm-panel-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .tm-panel-label-inline {
+        font-size: 12px;
+      }
+      .tm-tag-mode {
+        border: 1px solid #94a3b8;
+        border-radius: 6px;
+        padding: 4px 6px;
+        background: #ffffff;
+      }
+      .tm-btn {
+        margin-left: auto;
+        border: 1px solid #94a3b8;
+        background: #e2e8f0;
+        border-radius: 6px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+      .tm-known-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      .tm-chip-toggle {
+        border: 1px solid #94a3b8;
+        background: #ffffff;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .tm-chip-toggle-active {
+        background: #0ea5e9;
+        border-color: #0284c7;
+        color: #ffffff;
+      }
+      .tm-kpis {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      .tm-kpi {
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 8px;
+      }
+      .tm-kpi span {
+        display: block;
+        font-size: 11px;
+        color: #475569;
+      }
+      .tm-kpi strong {
+        font-size: 12px;
+      }
+      .tm-tag-wrapper {
+        margin-top: 4px;
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .tm-tag-edit-btn {
+        border: 1px solid #94a3b8;
+        border-radius: 6px;
+        background: #eef2ff;
+        color: #1e293b;
+        font-size: 11px;
+        padding: 1px 6px;
+        cursor: pointer;
+      }
+      .tm-row-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .tm-tag-chip {
+        border-radius: 999px;
+        background: #dcfce7;
+        color: #166534;
+        font-size: 10px;
+        padding: 1px 6px;
+        line-height: 1.6;
+      }
+      .tm-tag-chip-empty {
+        background: #e2e8f0;
+        color: #475569;
+      }
+    `;
+      document.head.appendChild(style);
+    }
+    function bootstrap() {
+      injectStyles();
+      refreshTable();
+      const observer = new MutationObserver(() => {
+        scheduleRefresh();
+      });
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+      window.addEventListener("load", scheduleRefresh);
+      setInterval(scheduleRefresh, 2500);
+    }
+    bootstrap();
+  })();
+})();
